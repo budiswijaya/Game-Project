@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+  </head>
+  <body>
+    <canvas
+      id="playerCanvas"
+      width="750"
+      height="300"
+      style="border: 1px solid black"
+    ></canvas>
+  </body>
+
+  <script>
+    // ------------------- Variable -------------------
+    const playerCanvas = document.getElementById("playerCanvas");
+    const playerCtx = playerCanvas.getContext("2d");
+
+    const WIDTH = playerCanvas.width;
+    const HEIGHT = playerCanvas.height;
+
+    // ---- World & Camera ----
+    const worldWidth = 1500;
+    const worldHeight = 350;
+    let cameraX = 0;
+    let cameraY = 0;
+    const gravity = 0.1;
+    const weather = true;
+    const windyness = 2;
+    const earthquake = 0.5;
+
+    // ---- Player ----
+    const player = {
+      // Initial player position and properties
+      x: 50,
+      y: HEIGHT - 40,
+      width: 40,
+      height: 40,
+      // Initial player velocity = position after per/any movement/frame should be applied
+      velocityX: 0,
+      velocityY: 0,
+      speed: 2,
+      jumpStrength: -10,
+      grounded: false,
+
+      // New health system
+      health: 3,
+      maxHealth: 3,
+      damageCooldown: 0, // frames of invincibility left
+
+      respawnX: 50,
+      respawnY: HEIGHT - 40,
+    };
+
+    // ---- Platforms & Hazards ----
+    const platforms = [
+      { x: 50, y: HEIGHT - 60, width: 50, height: 5 },
+      { x: 200, y: HEIGHT - 100, width: 75, height: 5 },
+      { x: 400, y: HEIGHT - 75, width: 80, height: 5 },
+      { x: 600, y: HEIGHT - 120, width: 100, height: 5 },
+      { x: 850, y: HEIGHT - 90, width: 80, height: 5 },
+      { x: 1100, y: HEIGHT - 130, width: 150, height: 5 },
+    ];
+
+    const hazards = [
+      { x: 300, y: HEIGHT - 20, width: 40, height: 20 },
+      { x: 500, y: HEIGHT - 10, width: 100, height: 10 },
+      { x: 800, y: HEIGHT - 5, width: 300, height: 20 },
+    ];
+
+    // ---- Checkpoint ----
+    const checkpoints = [
+      { x: 600, y: HEIGHT - 150, width: 30, height: 30 }, // example
+      { x: 1100, y: HEIGHT - 180, width: 30, height: 30 },
+    ];
+
+    // ---- Controls ----
+    const keys = {};
+    window.addEventListener("keydown", (e) => (keys[e.key] = true));
+    window.addEventListener("keyup", (e) => (keys[e.key] = false));
+
+    // ------------------- AIMING -------------------
+    let aimAngle = -Math.PI / 4; // Start aiming at 45 degrees up
+    let aimPower = 5;
+    const minPower = 2,
+      maxPower = 15;
+    const angleStep = Math.PI / 90,
+      powerStep = 0.5;
+
+    window.addEventListener("keydown", (e) => {
+      // Adjust aim
+      if (e.key === "ArrowLeft") aimAngle -= angleStep;
+      if (e.key === "ArrowRight") aimAngle += angleStep;
+      if (e.key === "ArrowUp")
+        aimPower = Math.min(maxPower, aimPower + powerStep);
+      if (e.key === "ArrowDown")
+        aimPower = Math.max(minPower, aimPower - powerStep);
+
+      // Fire projectile from player center
+      if (e.key === "f") {
+        projectiles.push(
+          new Projectile(
+            player.x + player.width / 2,
+            player.y + player.height / 2,
+            aimAngle,
+            aimPower
+          )
+        );
+      }
+    });
+
+    window.addEventListener("keyup", (e) => {
+      keys[e.key] = false;
+    });
+
+    // ---- Projectiles ----
+    const projectiles = [];
+    const pgravity = 0.2;
+
+    class Projectile {
+      constructor(x, y, angle, power) {
+        this.x = x;
+        this.y = y;
+        this.radius = 5;
+        this.vx = Math.cos(angle) * power;
+        this.vy = Math.sin(angle) * power;
+        this.active = true;
+      }
+      update() {
+        this.vy += pgravity;
+        this.x += this.vx;
+        this.y += this.vy;
+        if (this.x < 0 || this.x > worldWidth || this.y > worldHeight)
+          this.active = false;
+      }
+      draw(ctx) {
+        ctx.fillStyle = "orange";
+        ctx.beginPath();
+        ctx.arc(
+          this.x - cameraX,
+          this.y - cameraY,
+          this.radius,
+          0,
+          Math.PI * 2
+        );
+        ctx.fill();
+      }
+    }
+
+    // ------------------- UPDATE PLAYER -------------------
+    function updatePlayer() {
+      // Horizontal movement
+      if (keys["a"]) {
+        player.velocityX =
+          keys["Shift"] && player.grounded ? -player.speed * 3 : -player.speed;
+      } else if (keys["d"]) {
+        player.velocityX =
+          keys["Shift"] && player.grounded ? player.speed * 3 : player.speed;
+      } else {
+        player.velocityX = 0;
+      }
+
+      // Jump
+      if (keys[" "] && player.grounded) {
+        let jumpForce = player.jumpStrength;
+
+        if (weather) {
+          // add randomness instead of overwriting
+          jumpForce += -Math.random() * earthquake - earthquake + 1.5;
+        }
+
+        player.velocityY = jumpForce;
+        player.grounded = false;
+      }
+
+      // Softer gravity while rising
+      if (
+        (keys["ArrowUp"] || keys[" "]) &&
+        !player.grounded &&
+        player.velocityY < 0
+      ) {
+        player.velocityY += 0.2;
+      }
+
+      // Apply gravity
+      player.velocityY += gravity;
+
+      // Weather effects
+      if (weather) {
+        player.velocityX += Math.random() * windyness - windyness / 2;
+        player.velocityY += Math.random() * earthquake - earthquake / 2;
+      }
+
+      // Predict new position
+      let nextX = player.x + player.velocityX;
+      let nextY = player.y + player.velocityY;
+
+      // Move horizontally first
+      for (let p of platforms) {
+        if (
+          nextX < p.x + p.width &&
+          nextX + player.width > p.x &&
+          player.y < p.y + p.height &&
+          player.y + player.height > p.y
+        ) {
+          // collision from left
+          if (player.velocityX > 0) nextX = p.x - player.width;
+          // collision from right
+          if (player.velocityX < 0) nextX = p.x + p.width;
+        }
+      }
+      player.x = nextX;
+
+      // Move vertically second
+      player.grounded = false;
+      for (let p of platforms) {
+        if (
+          player.x < p.x + p.width &&
+          player.x + player.width > p.x &&
+          nextY < p.y + p.height &&
+          nextY + player.height > p.y
+        ) {
+          // landing on top
+          if (player.velocityY > 0) {
+            nextY = p.y - player.height;
+            player.velocityY = 0;
+            player.grounded = true;
+
+            console.log("Landed on platform at:", p.x, p.y);
+          }
+          // hitting head
+          else if (player.velocityY < 0) {
+            nextY = p.y + p.height;
+            player.velocityY = 0;
+          }
+        }
+      }
+      player.y = nextY;
+
+      // ---- HAZARD COLLISION ----
+      let hitHazard = false;
+      for (let h of hazards) {
+        if (
+          player.x < h.x + h.width &&
+          player.x + player.width > h.x &&
+          player.y < h.y + h.height &&
+          player.y + player.height > h.y
+        ) {
+          hitHazard = true;
+          break;
+        }
+      }
+
+      if (hitHazard && player.damageCooldown <= 0) {
+        console.log("💀 Hazard hit!");
+        player.health -= 1;
+        player.damageCooldown = 60; // ~1 second at 60fps
+
+        if (player.health <= 0) {
+          console.log("☠️ Respawning...");
+          player.x = player.respawnX;
+          player.y = player.respawnY;
+          player.velocityX = 0;
+          player.velocityY = 0;
+          player.health = player.maxHealth; // reset health on respawn
+        }
+      }
+
+      // reduce cooldown each frame
+      if (player.damageCooldown > 0) {
+        player.damageCooldown--;
+      }
+
+      for (let c of checkpoints) {
+        if (
+          player.x < c.x + c.width &&
+          player.x + player.width > c.x &&
+          player.y < c.y + c.height &&
+          player.y + player.height > c.y
+        ) {
+          player.respawnX = c.x;
+          player.respawnY = c.y - player.height; // stand on top
+          console.log(
+            "✅ Checkpoint reached:",
+            player.respawnX,
+            player.respawnY
+          );
+        }
+      }
+
+      // ------------------- CAMERA -------------------
+      const centerX = WIDTH / 2;
+      const centerY = HEIGHT / 2;
+
+      // Move the camera so that the player is always centered on
+      // the screen (horizontally).
+      let desiredCameraX = player.x - centerX;
+      let desiredCameraY = player.y - centerY;
+
+      cameraX = Math.max(0, Math.min(desiredCameraX, worldWidth - WIDTH));
+      cameraY = Math.max(0, Math.min(desiredCameraY, worldHeight - HEIGHT));
+
+      if (cameraX < 0) cameraX = 0;
+      if (cameraX > worldWidth - WIDTH) cameraX = worldWidth - WIDTH;
+
+      if (cameraY < 0) cameraY = 0;
+      if (cameraY > worldHeight - HEIGHT) cameraY = worldHeight - HEIGHT;
+
+      // ------------------- WORLD BOUNDARIES -------------------
+      // Floor
+      if (player.y + player.height > worldHeight) {
+        player.y = worldHeight - player.height;
+        player.velocityY = 0;
+        player.grounded = true;
+      }
+
+      // Ceiling
+      if (player.y < 0) player.y = 0;
+
+      // Walls
+      if (player.x < 0) player.x = 0;
+      if (player.x + player.width > worldWidth)
+        player.x = worldWidth - player.width;
+
+      debugDrawPrediction(nextX, nextY);
+    }
+
+    // ------------------- DRAW -------------------
+    function drawPlayer() {
+      // Blink effect during cooldown
+      if (
+        player.damageCooldown > 0 &&
+        Math.floor(player.damageCooldown / 5) % 2 === 0
+      ) {
+        return; // skip drawing (invisible frame)
+      }
+
+      playerCtx.fillStyle = "red";
+      playerCtx.fillRect(
+        player.x - cameraX,
+        player.y - cameraY,
+        player.width,
+        player.height
+      );
+    }
+
+    function drawHealthBar() {
+      const barWidth = 100;
+      const barHeight = 10;
+      const x = 20;
+      const y = 20;
+
+      // Background
+      playerCtx.fillStyle = "grey";
+      playerCtx.fillRect(x, y, barWidth, barHeight);
+
+      // Health portion
+      let healthWidth = (player.health / player.maxHealth) * barWidth;
+      playerCtx.fillStyle = "red";
+      playerCtx.fillRect(x, y, healthWidth, barHeight);
+
+      // Border
+      playerCtx.strokeStyle = "black";
+      playerCtx.strokeRect(x, y, barWidth, barHeight);
+    }
+
+    function drawPlatforms() {
+      playerCtx.fillStyle = "brown";
+      platforms.forEach((p) => {
+        playerCtx.fillRect(p.x - cameraX, p.y - cameraY, p.width, p.height);
+      });
+    }
+
+    function drawHazards() {
+      playerCtx.fillStyle = "purple"; // pick any color for danger
+      hazards.forEach((h) => {
+        playerCtx.fillRect(h.x - cameraX, h.y - cameraY, h.width, h.height);
+      });
+    }
+
+    function drawCheckpoints() {
+      playerCtx.fillStyle = "gold";
+      checkpoints.forEach((c) => {
+        playerCtx.fillRect(c.x - cameraX, c.y - cameraY, c.width, c.height);
+      });
+    }
+
+    function drawProjectiles() {
+      projectiles.forEach((p) => p.draw(playerCtx)); // fixed from ctx -> playerCtx
+    }
+
+    function drawAimLine() {
+      const startX = player.x + player.width / 2 - cameraX;
+      const startY = player.y + player.height / 2 - cameraY; // match projectile spawn
+      const endX = startX + Math.cos(aimAngle) * aimPower * 10;
+      const endY = startY + Math.sin(aimAngle) * aimPower * 10;
+
+      playerCtx.strokeStyle = "gray";
+      playerCtx.lineWidth = 1;
+      playerCtx.beginPath();
+      playerCtx.moveTo(startX, startY);
+      playerCtx.lineTo(endX, endY);
+      playerCtx.stroke();
+    }
+
+    function updateProjectiles() {
+      for (let p of projectiles) p.update();
+      // Remove inactive projectiles
+      for (let i = projectiles.length - 1; i >= 0; i--) {
+        if (!projectiles[i].active) projectiles.splice(i, 1);
+      }
+    }
+
+    function drawFloor() {
+      playerCtx.fillStyle = "green"; // grass floor
+      playerCtx.fillRect(
+        0 - cameraX,
+        worldHeight - 10 - cameraY,
+        worldWidth,
+        10
+      ); // grass strip
+
+      playerCtx.fillStyle = "darkgreen"; // dirt underneath
+      playerCtx.fillRect(
+        0 - cameraX,
+        worldHeight - cameraY,
+        worldWidth,
+        HEIGHT
+      );
+    }
+
+    function drawHitboxes() {
+      // Player
+      playerCtx.strokeStyle = "lime";
+      playerCtx.strokeRect(
+        player.x - cameraX,
+        player.y - cameraY,
+        player.width,
+        player.height
+      );
+
+      // Platforms
+      for (let p of platforms) {
+        playerCtx.strokeStyle = "blue";
+        playerCtx.strokeRect(p.x - cameraX, p.y - cameraY, p.width, p.height);
+      }
+
+      // Hazards
+      for (let h of hazards) {
+        playerCtx.strokeStyle = "red";
+        playerCtx.strokeRect(h.x - cameraX, h.y - cameraY, h.width, h.height);
+      }
+    }
+
+    function debugDrawPrediction(nextX, nextY) {
+      playerCtx.fillStyle = "rgba(255,0,0,0.3)"; // semi-transparent red
+      playerCtx.fillRect(
+        nextX - cameraX,
+        nextY - cameraY,
+        player.width,
+        player.height
+      );
+    }
+
+    // ------------------- GAME LOOP -------------------
+    function gameLoop() {
+      playerCtx.clearRect(0, 0, WIDTH, HEIGHT);
+
+      updatePlayer();
+      drawFloor();
+      drawPlatforms();
+      drawHazards();
+      drawCheckpoints();
+      drawPlayer();
+      drawAimLine();
+      drawHitboxes();
+      updateProjectiles();
+      drawProjectiles();
+      drawHealthBar(); // ⬅️ move it here
+      requestAnimationFrame(gameLoop);
+    }
+
+    gameLoop();
+  </script>
+</html>

@@ -1,0 +1,1014 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wild Ones – Day 14 Build</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        padding: 0;
+        background: #0f1220;
+        color: #ddd;
+        font-family: system-ui, Arial, sans-serif;
+        overflow: hidden;
+      }
+      #game {
+        display: block;
+        margin: 0 auto;
+        background: #9ac7ff;
+      }
+      .overlay {
+        position: fixed;
+        inset: 0;
+        display: none;
+        align-items: center;
+        justify-content: center;
+        background: rgba(0, 0, 0, 0.4);
+        color: #fff;
+        font-size: 24px;
+      }
+      .overlay.show {
+        display: flex;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas id="game" width="1900" height="920"></canvas>
+    <div id="overlay" class="overlay"></div>
+
+    <script>
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width,
+        H = canvas.height;
+
+      // ------------------- WORLD -------------------
+      const TIME_SCALE = 0.3; // global slowdown visual/physics
+      const FRAME_STEP = TIME_SCALE; // physics multiplier per frame
+      const KILL_Y = H + 50; // falling below this = death
+
+      const gravity = 0.1;
+      let currentTurn = "player";
+      // --- TIMERS are frame-based (don't scale these or they stall) ---
+
+      let turnTimer = 3600; // ~60s
+      let projectileFiredThisTurn = false;
+      let wind = (Math.random() * 2 - 1) * 2; // -2..2
+      // --- TURN PHASES ---
+      let turnPhase = "aim"; // "aim" | "projectile" | "postmove"
+      let postMoveFrames = 0; // counts down in frames
+      const POST_MOVE_FRAMES = 5 * 60; // 5 seconds @ ~60fps
+
+      const floorY = H / 1.25;
+
+      // Destructible terrain mask
+      const terrainCanvas = document.createElement("canvas");
+      terrainCanvas.width = W;
+      terrainCanvas.height = H;
+      const tctx = terrainCanvas.getContext("2d");
+      function paintTerrain() {
+        const base = floorY;
+        tctx.clearRect(0, 0, W, H);
+
+        // rolling ground using layered sines
+        tctx.fillStyle = "#3f7f3f";
+        tctx.beginPath();
+        tctx.moveTo(0, H);
+        tctx.lineTo(0, base);
+        for (let x = 0; x <= W; x += 20) {
+          const y =
+            base -
+            40 * Math.sin(x * 0.002) -
+            25 * Math.sin(x * 0.005 + 1.7) -
+            15 * Math.sin(x * 0.011 + 3.3);
+          tctx.lineTo(x, y);
+        }
+        tctx.lineTo(W, H);
+        tctx.closePath();
+        tctx.fill();
+
+        // floating islands / arches (additive)
+        tctx.fillStyle = "#3f7f3f";
+        const blobs = [
+          { x: 420, y: base - 220, r: 120 },
+          { x: 820, y: base - 300, r: 160 },
+          { x: 1220, y: base - 260, r: 140 },
+          { x: 1520, y: base - 180, r: 100 },
+        ];
+        for (const b of blobs) {
+          tctx.beginPath();
+          tctx.arc(b.x, b.y, b.r, 0, Math.PI * 2);
+          tctx.fill();
+        }
+
+        // carve caves/tunnels (destructive to terrain)
+        tctx.save();
+        tctx.globalCompositeOperation = "destination-out";
+        const holes = [
+          { x: 820, y: base - 300, r: 60 },
+          { x: 1220, y: base - 260, r: 50 },
+          { x: 600, y: base - 30, r: 40 },
+        ];
+        for (const h of holes) {
+          tctx.beginPath();
+          tctx.arc(h.x, h.y, h.r, 0, Math.PI * 2);
+          tctx.fill();
+        }
+        // a tunnel
+        tctx.beginPath();
+        tctx.moveTo(300, base - 40);
+        tctx.quadraticCurveTo(600, base - 120, 900, base - 40);
+        tctx.lineWidth = 50;
+        tctx.stroke();
+        tctx.restore();
+      }
+      paintTerrain();
+
+      const platforms = [
+        {
+          x: 200,
+          y: floorY - 100,
+          width: 150,
+          height: 5,
+          vx: 1.5 * FRAME_STEP,
+          color: "#8b5a2b",
+        },
+        {
+          x: 500,
+          y: floorY - 300,
+          width: 5,
+          height: 200,
+          vx: -1.0 * FRAME_STEP,
+          color: "#8b5a2b",
+        },
+        {
+          x: 800,
+          y: floorY - 250,
+          width: 100,
+          height: 5,
+          vx: 2.0 * FRAME_STEP,
+          color: "#8b5a2b",
+        },
+        {
+          x: 1100,
+          y: floorY - 400,
+          width: 300,
+          height: 5,
+          vx: -2.5 * FRAME_STEP,
+          color: "#8b5a2b",
+        },
+      ];
+
+      // ------------------- CAMERA -------------------
+      const cam = {
+        x: W / 2,
+        y: H / 2,
+        scale: 1,
+        targetScale: 1,
+        shake: 0,
+        sx: 0,
+        sy: 0,
+      };
+      function updateCamera() {
+        let targetX, targetY;
+        if (projectiles.length > 0) {
+          const p = projectiles[0]; // follow projectile path
+          targetX = p.x;
+          targetY = p.y;
+        } else {
+          const ch = currentTurn === "player" ? player : enemy;
+          targetX = ch.x + ch.width / 2;
+          targetY = ch.y + ch.height / 2;
+        }
+        cam.targetScale = 1; // no zooming
+
+        // slightly slower easing for smoother feel
+        cam.x += (targetX - cam.x) * 0.05;
+        cam.y += (targetY - cam.y) * 0.05;
+        cam.scale += (cam.targetScale - cam.scale) * 0.1;
+
+        // Clamp so we don't show outside the world
+        const halfW = W / 2 / cam.scale,
+          halfH = H / 2 / cam.scale;
+        cam.x = Math.max(halfW, Math.min(W - halfW, cam.x));
+        cam.y = Math.max(halfH, Math.min(H - halfH, cam.y));
+
+        // Screen shake
+        if (cam.shake > 0.1) {
+          cam.sx = (Math.random() * 2 - 1) * cam.shake;
+          cam.sy = (Math.random() * 2 - 1) * cam.shake;
+          cam.shake *= 0.9;
+        } else {
+          cam.sx = cam.sy = 0;
+          cam.shake = 0;
+        }
+        cam.shake = Math.min(cam.shake, 14);
+      }
+      function setCameraTransform() {
+        ctx.setTransform(
+          cam.scale,
+          0,
+          0,
+          cam.scale,
+          W / 2 + cam.sx,
+          H / 2 + cam.sy
+        );
+        ctx.translate(-cam.x, -cam.y);
+      }
+      function resetTransform() {
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+      }
+      function screenToWorld(sx, sy) {
+        const wx = (sx - (W / 2 + cam.sx)) / cam.scale + cam.x;
+        const wy = (sy - (H / 2 + cam.sy)) / cam.scale + cam.y;
+        return { x: wx, y: wy };
+      }
+
+      // ------------------- ENTITIES -------------------
+      const player = {
+        x: 100,
+        y: floorY - 25,
+        width: 25,
+        height: 25,
+        health: 5,
+        maxHealth: 5,
+        vx: 0,
+        vy: 0,
+        speed: 2,
+        jump: -10,
+        grounded: false,
+      };
+      const enemy = {
+        x: 1800,
+        y: floorY - 25,
+        width: 25,
+        height: 25,
+        health: 5,
+        maxHealth: 5,
+        vx: 0,
+        vy: 0,
+        speed: 2,
+        jump: -10,
+        grounded: false,
+        cooldown: 0,
+      };
+      let enemyWeaponForTurn = "rocket";
+      // ------------------- INPUT -------------------
+      const keys = {};
+      addEventListener("keydown", (e) => {
+        keys[e.key] = true;
+        if (e.key === "r" || e.key === "R") location.reload();
+      });
+      addEventListener("keyup", (e) => (keys[e.key] = false));
+
+      // ------------------- WEAPONS -------------------
+      const weapons = {
+        rocket: {
+          speed: 3.2,
+          radius: 20,
+          damage: 2,
+          gravityScale: 0.95,
+          drag: 0.002,
+        },
+        grenade: {
+          speed: 3.0,
+          radius: 220,
+          damage: 3,
+          fuse: 300,
+          gravityScale: 1.6,
+          drag: 0.012,
+        },
+        cluster: {
+          speed: 3.3,
+          radius: 16,
+          damage: 1,
+          splits: 8,
+          gravityScale: 1.05,
+          drag: 0.006,
+        },
+      };
+
+      const weaponKeys = ["rocket", "grenade", "cluster"];
+      let currentWeaponIndex = 0;
+      addEventListener("keydown", (e) => {
+        if (e.key === "1") currentWeaponIndex = 0;
+        if (e.key === "2") currentWeaponIndex = 1;
+        if (e.key === "3") currentWeaponIndex = 2;
+      });
+
+      // ------------------- AIMING -------------------
+      let isAiming = false,
+        aimStart = { x: 0, y: 0 },
+        aimAngle = 0,
+        aimPower = 0;
+      let aimDot = null; // marker for where player first clicked
+
+      canvas.addEventListener("mousedown", (e) => {
+        // only start aiming if it's the player's turn and they haven't fired yet
+        if (currentTurn !== "player" || projectileFiredThisTurn) return;
+        isAiming = true;
+        aimStart = screenToWorld(e.offsetX, e.offsetY);
+        aimDot = { x: aimStart.x, y: aimStart.y }; // remember click start
+      });
+
+      canvas.addEventListener("mousemove", (e) => {
+        if (!isAiming) return;
+        const m = screenToWorld(e.offsetX, e.offsetY);
+        const dx = aimStart.x - m.x;
+        const dy = aimStart.y - m.y;
+        aimAngle = Math.atan2(dy, dx);
+        aimPower = Math.min(Math.sqrt(dx * dx + dy * dy) / 24, 10);
+      });
+      canvas.addEventListener("mouseup", (e) => {
+        if (!isAiming) return;
+        isAiming = false;
+
+        // prevent firing when it's not the player's turn or already fired
+        if (currentTurn !== "player" || projectileFiredThisTurn) return;
+
+        const type = weaponKeys[currentWeaponIndex];
+        const offset = player.width / 2 + 10;
+        const spawnX =
+          player.x + player.width / 2 + Math.cos(aimAngle) * (offset + 2);
+        const spawnY =
+          player.y + player.height / 2 + Math.sin(aimAngle) * (offset + 2);
+
+        projectiles.push(
+          new Projectile(spawnX, spawnY, aimAngle, aimPower, type)
+        );
+        cam.shake = Math.max(cam.shake, 4);
+        projectileFiredThisTurn = true;
+
+        // Immediately give the player the post-shot 5s move window (no freeze)
+        turnPhase = "postmove";
+        postMoveFrames = POST_MOVE_FRAMES;
+      });
+
+      // ------------------- PROJECTILES / FX -------------------
+      let projectiles = [],
+        explosions = [],
+        particles = [],
+        damagePopups = [];
+
+      class Projectile {
+        constructor(x, y, angle, power, type) {
+          this.x = x;
+          this.y = y;
+          this.type = type;
+          this.weapon = weapons[type];
+          this.r = 8;
+          this.vx = Math.cos(angle) * power * this.weapon.speed;
+          this.vy = Math.sin(angle) * power * this.weapon.speed;
+          this.active = true;
+          this.fuse = this.weapon.fuse ?? null;
+        }
+        update() {
+          if (!this.active) return;
+          const gScale = this.weapon.gravityScale || 1;
+          const drag = this.weapon.drag || 0;
+
+          this.vy += gravity * gScale * FRAME_STEP;
+
+          this.vx *= 1 - drag;
+          this.vy *= 1 - drag;
+
+          this.vx += wind * 0.01 * FRAME_STEP;
+          this.x += this.vx * FRAME_STEP;
+          this.y += this.vy * FRAME_STEP;
+
+          if (this.fuse !== null) {
+            this.fuse--;
+            if (this.fuse <= 0) this.explode();
+          }
+          // collisions: terrain floor, platforms, chars, bounds
+          if (isSolidPixel(this.x | 0, (this.y + this.r) | 0)) {
+            this.explode();
+          }
+          if (this.x < 0 || this.x > W || this.y > H) this.explode();
+          for (const p of platforms) {
+            if (
+              this.x > p.x &&
+              this.x < p.x + p.width &&
+              this.y > p.y &&
+              this.y < p.y + p.height
+            ) {
+              this.explode();
+              break;
+            }
+          }
+          for (const ch of [player, enemy]) {
+            if (
+              this.x > ch.x &&
+              this.x < ch.x + ch.width &&
+              this.y > ch.y &&
+              this.y < ch.y + ch.height
+            ) {
+              this.explode();
+              break;
+            }
+          }
+        }
+        explode() {
+          if (!this.active) return;
+          this.active = false;
+          explosions.push(new Explosion(this.x, this.y, this.weapon));
+          if (this.type === "cluster") {
+            for (let i = 0; i < this.weapon.splits; i++) {
+              const ang = Math.random() * Math.PI * 2;
+              const pow = 0.5 + Math.random();
+              projectiles.push(
+                new Projectile(this.x, this.y, ang, pow, "rocket")
+              );
+            }
+          }
+        }
+        draw(ctx) {
+          ctx.fillStyle =
+            this.type === "grenade"
+              ? "#42b883"
+              : this.type === "cluster"
+              ? "#a259ff"
+              : "#ff9800";
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      class Explosion {
+        constructor(x, y, weapon) {
+          this.x = x;
+          this.y = y;
+          this.weapon = weapon;
+          this.r = 0;
+          this.maxR = weapon.radius;
+          this.alpha = 1;
+          this.carved = false;
+        }
+        update() {
+          if (!this.carved) {
+            // carve terrain
+            tctx.save();
+            tctx.globalCompositeOperation = "destination-out";
+            tctx.beginPath();
+            tctx.arc(this.x, this.y, this.maxR, 0, Math.PI * 2);
+            tctx.fill();
+            tctx.restore();
+            this.carved = true;
+            // damage & knockback
+            for (const ch of [player, enemy]) {
+              const dx = ch.x + ch.width / 2 - this.x;
+              const dy = ch.y + ch.height / 2 - this.y;
+              const dist = Math.hypot(dx, dy) || 0.0001;
+              if (dist < this.maxR) {
+                ch.health -= this.weapon.damage;
+                if (ch.health < 0) ch.health = 0;
+                damagePopups.push({
+                  x: ch.x + ch.width / 2,
+                  y: ch.y,
+                  value: "-" + this.weapon.damage,
+                  alpha: 1,
+                });
+                const force = (this.maxR - dist) * 0.25;
+                ch.vx += (dx / dist) * force;
+                ch.vy += (dy / dist) * force;
+              }
+            }
+            // particles
+            for (let i = 0; i < 22; i++) {
+              const a = Math.random() * Math.PI * 2,
+                s = Math.random() * 3.5;
+              particles.push({
+                x: this.x,
+                y: this.y,
+                vx: Math.cos(a) * s,
+                vy: Math.sin(a) * s,
+                alpha: 1,
+                life: 40,
+              });
+            }
+            // camera shake
+            cam.shake += this.maxR * 0.08;
+          }
+          this.r = Math.min(this.maxR, this.r + 5);
+          this.alpha -= 0.05;
+        }
+        draw(ctx) {
+          if (this.alpha <= 0) return;
+          ctx.fillStyle = `rgba(255,165,0,${this.alpha})`;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // ------------------- AI -------------------
+      function handleEnemyShooting() {
+        if (enemy.cooldown > 0 || projectileFiredThisTurn) {
+          enemy.cooldown--;
+          return;
+        }
+
+        const dx = player.x + player.width / 2 - (enemy.x + enemy.width / 2);
+        const dy = player.y - enemy.y;
+        const ang = Math.atan2(dy, dx);
+        const pow = 0.6 * (6 + Math.random() * 2);
+
+        const offset = enemy.width / 2 + 10;
+        const spawnX = enemy.x + enemy.width / 2 + Math.cos(ang) * offset;
+        const spawnY = enemy.y + enemy.height / 2 + Math.sin(ang) * offset;
+
+        projectiles.push(new Projectile(spawnX, spawnY, ang, pow, "rocket"));
+        projectileFiredThisTurn = true;
+        cam.shake = Math.max(cam.shake, 4);
+
+        turnPhase = "projectile";
+        enemy.cooldown = 120;
+      }
+
+      function checkPitDeath(ch) {
+        if (ch.health > 0 && ch.y > KILL_Y) {
+          ch.health = 0; // triggers your overlay
+          ch.vx = 0;
+          ch.vy = 0;
+        }
+      }
+
+      // ------------------- TURN SYSTEM -------------------
+      function updateTurn() {
+        // tick main turn timer unless we're in the post-move window
+        if (turnPhase !== "postmove") {
+          turnTimer--;
+          if (turnTimer <= 0) endTurn();
+        }
+
+        // Enemy logic only on enemy turn
+        if (currentTurn === "enemy") handleEnemyShooting();
+
+        // Move platforms (unchanged)
+        for (const p of platforms) {
+          p.prevX = p.prevX ?? p.x;
+          p.prevY = p.prevY ?? p.y;
+
+          p.x += p.vx;
+          if (p.x < 0 || p.x + p.width > W) p.vx *= -1;
+
+          p.velX = p.x - p.prevX;
+          p.velY = p.y - p.prevY;
+
+          p.prevX = p.x;
+          p.prevY = p.y;
+        }
+
+        // === Unified physics & AI decision flow ===
+        // Player: if it's player turn & in aim/postmove accept input, otherwise no input (physics still applies)
+        if (
+          currentTurn === "player" &&
+          (turnPhase === "aim" || turnPhase === "postmove")
+        ) {
+          applyPhysics(player, { left: "a", right: "d", jump: " " });
+        } else {
+          applyPhysics(player); // player still falls & collides even when not controlled
+        }
+
+        // Enemy decision-making only when it's enemy's turn.
+        // AI should set intentions (vx, or vy for a jump) but not perform physics itself.
+        if (currentTurn === "enemy") {
+          const choices = ["rocket", "grenade", "cluster"];
+          enemyWeaponForTurn = choices[(Math.random() * choices.length) | 0];
+
+          // AI decides direction/jump only (no direct x/y integration)
+          updateEnemyAI(enemy, player);
+
+          // Let enemy shoot via handleEnemyShooting (this already sets projectileFiredThisTurn etc.)
+          // (You already call handleEnemyShooting() earlier in updateTurn; keep that.)
+        }
+
+        // Always run physics for the enemy so it falls / collides correctly every frame
+        applyPhysics(enemy);
+
+        checkPitDeath(player);
+        checkPitDeath(enemy);
+
+        // Projectiles & FX (unchanged)
+        for (const pr of projectiles) pr.update();
+        projectiles = projectiles.filter((pr) => pr.active);
+        for (const ex of explosions) ex.update();
+        explosions = explosions.filter((ex) => ex.alpha > 0);
+        for (const pt of particles) {
+          pt.x += pt.vx * FRAME_STEP;
+          pt.y += pt.vy * FRAME_STEP;
+          pt.vy += 0.02 * FRAME_STEP;
+          pt.alpha -= 0.02 * FRAME_STEP;
+        }
+        particles = particles.filter((pt) => pt.alpha > 0);
+        for (const dp of damagePopups) {
+          dp.y -= 0.4 * FRAME_STEP;
+          dp.alpha -= 0.02 * FRAME_STEP;
+        }
+        damagePopups = damagePopups.filter((dp) => dp.alpha > 0);
+
+        // PHASE MACHINE:
+        // if we were in the 'projectile' phase and everything settled, go to postmove (player) or end turn (enemy)
+        if (
+          turnPhase === "projectile" &&
+          projectiles.length === 0 &&
+          explosions.length === 0
+        ) {
+          if (currentTurn === "player") {
+            turnPhase = "postmove";
+            postMoveFrames = POST_MOVE_FRAMES;
+          } else {
+            endTurn();
+          }
+        } else if (turnPhase === "postmove") {
+          // count down the 5s window, then end turn
+          if (postMoveFrames > 0) {
+            postMoveFrames--;
+          } else {
+            endTurn();
+          }
+        }
+
+        // Check game over overlay (unchanged)
+        const overlay = document.getElementById("overlay");
+        if (player.health <= 0 || enemy.health <= 0) {
+          overlay.classList.add("show");
+          overlay.textContent =
+            (player.health <= 0 ? "Enemy wins!" : "Player wins!") +
+            "  —  Press R to restart";
+        } else {
+          overlay.classList.remove("show");
+          overlay.textContent = "";
+        }
+      }
+
+      function endTurn() {
+        turnTimer = 3600;
+        projectileFiredThisTurn = false;
+        currentTurn = currentTurn === "player" ? "enemy" : "player";
+        wind = (Math.random() * 2 - 1) * 2;
+
+        // reset phase for the next player
+        turnPhase = "aim";
+        postMoveFrames = 0;
+      }
+
+      // ------------------- MOVEMENT & COLLISION -------------------
+      function updateCharacterMovement(ch, controls = {}) {
+        // If controls object contains keys, interpret as "player-controlled input".
+        // If controls is empty / not provided, we treat it as "no input" (AI/inertia).
+        const hasInput = !!(controls.left || controls.right || controls.jump);
+
+        // Horizontal input (only override when input provided)
+        if (hasInput) {
+          if (keys[controls.left])
+            ch.vx = ch.grounded ? -ch.speed * 2 : -ch.speed;
+          else if (keys[controls.right])
+            ch.vx = ch.grounded ? ch.speed * 2 : ch.speed;
+          else ch.vx = 0;
+        } else {
+          // No input: do NOT stomp on ch.vx (AI sets it), but apply light friction when grounded
+          if (ch.grounded) ch.vx *= 0.92;
+        }
+
+        // Jump input (only when input provided)
+        if (hasInput && keys[controls.jump] && ch.grounded) {
+          ch.vy = ch.jump;
+          ch.grounded = false;
+        }
+        // variable jump height (still only when input provided)
+        if (hasInput && keys[controls.jump] && !ch.grounded && ch.vy < 0)
+          ch.vy += 0.08;
+
+        // Gravity & integrate velocity -> position
+        ch.vy += gravity * FRAME_STEP;
+        ch.x += ch.vx * FRAME_STEP;
+        ch.y += ch.vy * FRAME_STEP;
+
+        // Platform collisions (AABB) — same logic you had, but safe to call for both characters
+        ch.grounded = false;
+        ch.standingOn = null; // reset each frame
+
+        for (const p of platforms) {
+          if (
+            ch.x < p.x + p.width &&
+            ch.x + ch.width > p.x &&
+            ch.y < p.y + p.height &&
+            ch.y + ch.height > p.y
+          ) {
+            if (ch.vy > 0 && ch.y + ch.height - p.y < 20) {
+              // land on top
+              ch.y = p.y - ch.height;
+              ch.vy = 0;
+              ch.grounded = true;
+              ch.standingOn = p;
+            } else if (ch.vy < 0) {
+              ch.y = p.y + p.height;
+              ch.vy = 0;
+            } else if (ch.vx > 0) {
+              ch.x = p.x - ch.width;
+            } else if (ch.vx < 0) {
+              ch.x = p.x + p.width;
+            }
+          }
+          // push character if platform itself moves into them
+          if (
+            ch.x < p.x + p.width &&
+            ch.x + ch.width > p.x &&
+            ch.y + ch.height > p.y &&
+            ch.y < p.y + p.height
+          ) {
+            if (p.vx > 0) {
+              ch.x = p.x + p.width;
+            } else if (p.vx < 0) {
+              ch.x = p.x - ch.width;
+            }
+          }
+        }
+
+        if (ch.standingOn) {
+          ch.x += ch.standingOn.velX || 0;
+          ch.y += ch.standingOn.velY || 0;
+        }
+      }
+
+      function applyWorldCollision(ch) {
+        // Destructible terrain support at feet: push up out of solids
+        let collided = true,
+          safety = 0;
+        while (collided && safety < 8) {
+          collided = false;
+          safety++;
+          for (let i = 0; i < ch.width; i++) {
+            const px = (ch.x | 0) + i;
+            const py = (ch.y + ch.height) | 0;
+            if (isSolidPixel(px, py)) {
+              ch.y -= 1;
+              ch.vy = 0;
+              ch.grounded = true;
+              collided = true;
+              break;
+            }
+          }
+        }
+        // If not on solid, check just below
+        if (!collided) {
+          for (let i = 0; i < ch.width; i++) {
+            const px = (ch.x | 0) + i;
+            const py = (ch.y + ch.height + 1) | 0;
+            if (isSolidPixel(px, py)) {
+              ch.vy = 0;
+              ch.grounded = true;
+              break;
+            }
+          }
+        }
+        // World bounds
+        if (ch.y < 0) ch.y = 0;
+        if (ch.x < 0) ch.x = 0;
+        if (ch.x + ch.width > W) ch.x = W - ch.width;
+      }
+      // Shared physics step for both player and enemy.
+      // If 'controls' is provided (object with left/right/jump keys), movement input will be processed.
+      // Otherwise, the character's current vx/vy (set by AI or previous state) will be used.
+      function applyPhysics(ch, controls = null) {
+        if (controls) {
+          // player-controlled frame: update with input
+          updateCharacterMovement(ch, controls);
+        } else {
+          // no controls: still run the same movement pipeline but without overriding vx
+          // call updateCharacterMovement with empty controls so it applies gravity, platform logic and friction
+          updateCharacterMovement(ch, {});
+        }
+
+        // Now ensure we respect destructible terrain (snaps to actual remaining ground)
+        applyWorldCollision(ch);
+      }
+
+      function isSolidPixel(x, y) {
+        if (x < 0 || x >= W || y < 0 || y >= H) return false;
+        const d = tctx.getImageData(x, y, 1, 1).data;
+        return d[3] > 0;
+      }
+
+      function updateEnemyAI(en, pl) {
+        // Simple "intentions" AI: set vx direction, try to avoid cliffs and jump small obstacles.
+        // Physics (gravity, movement, collision) will be applied by applyPhysics().
+
+        const centerEn = en.x + en.width / 2;
+        const centerPl = pl.x + pl.width / 2;
+        const dx = centerPl - centerEn;
+        const absDx = Math.abs(dx);
+
+        // desired behavior tuning
+        const MIN_DIST = 220; // if too close, back off
+        const MAX_DIST = 520; // if too far, move closer
+
+        let desiredVx = 0;
+        if (absDx < MIN_DIST)
+          desiredVx = dx > 0 ? -en.speed : en.speed; // retreat
+        else if (absDx > MAX_DIST)
+          desiredVx = dx > 0 ? en.speed : -en.speed; // approach
+        else {
+          // in band: small idle wander
+          if (Math.random() < 0.007)
+            desiredVx = (Math.random() * 2 - 1) * en.speed * 0.6;
+          else desiredVx = 0;
+        }
+
+        // cliff detection: check a couple px ahead at foot level
+        const dir = desiredVx === 0 ? (dx >= 0 ? 1 : -1) : Math.sign(desiredVx);
+        const aheadX = Math.floor(en.x + (dir > 0 ? en.width + 4 : -4));
+        const footY = Math.floor(en.y + en.height);
+        const groundAhead =
+          isSolidPixel(aheadX, footY + 2) || isSolidPixel(aheadX, footY + 6);
+
+        if (!groundAhead && en.grounded) {
+          // avoid walking off: stop and occasionally try a small hop
+          desiredVx = 0;
+          if (Math.random() < 0.35) {
+            en.vy = en.jump * 0.9;
+            en.grounded = false;
+          }
+        }
+
+        // obstacle detection: if there's a wall at chest height, attempt a jump
+        const headY = Math.floor(en.y + en.height * 0.5);
+        if (isSolidPixel(aheadX, headY) && en.grounded) {
+          en.vy = en.jump;
+          en.grounded = false;
+        }
+
+        // Smoothly approach desiredVx (AI "acceleration"). We set en.vx here,
+        // physics will move the enemy in applyPhysics().
+        const accel = 0.18;
+        en.vx += (desiredVx - en.vx) * accel;
+
+        // tiny randomness so movement isn't perfectly deterministic
+        if (Math.random() < 0.005) en.vx += (Math.random() - 0.5) * 0.7;
+      }
+
+      // ------------------- DRAW -------------------
+      const clouds = Array.from({ length: 8 }, (_, i) => ({
+        x: Math.random() * W,
+        y: 60 + i * 80,
+        w: 140 + Math.random() * 120,
+        h: 30 + Math.random() * 10,
+        s: 0.2 + Math.random() * 0.4,
+      }));
+      function drawBackground() {
+        resetTransform();
+        const g = ctx.createLinearGradient(0, 0, 0, H);
+        g.addColorStop(0, "#87cefa");
+        g.addColorStop(1, "#4682b4");
+        ctx.fillStyle = g;
+        ctx.fillRect(0, 0, W, H);
+        // Parallax clouds (screen space)
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        for (const c of clouds) {
+          ctx.fillRect(c.x, c.y, c.w, c.h);
+          c.x = (c.x + c.s) % (W + c.w);
+        }
+      }
+
+      function drawWorld() {
+        setCameraTransform();
+        // Terrain layer
+        ctx.drawImage(terrainCanvas, 0, 0);
+
+        // Platforms
+        for (const p of platforms) {
+          ctx.fillStyle = p.color;
+          ctx.fillRect(p.x, p.y, p.width, p.height);
+        }
+        // Characters
+        ctx.fillStyle = "#1e90ff";
+        ctx.fillRect(player.x, player.y, player.width, player.height);
+        ctx.fillStyle = "#ff4d4d";
+        ctx.fillRect(enemy.x, enemy.y, enemy.width, enemy.height);
+        drawHealthBar(player);
+        drawHealthBar(enemy);
+        // Projectiles & FX
+        for (const pr of projectiles) pr.draw(ctx);
+        for (const ex of explosions) ex.draw(ctx);
+        // Particles
+        for (const pt of particles) {
+          ctx.globalAlpha = pt.alpha;
+          ctx.beginPath();
+          ctx.arc(pt.x, pt.y, 2.5, 0, Math.PI * 2);
+          ctx.fillStyle = "#fff";
+          ctx.fill();
+          ctx.globalAlpha = 1;
+        }
+        // Damage popups
+        ctx.fillStyle = "#fff";
+        ctx.font = "16px Arial";
+        ctx.textAlign = "center";
+        for (const dp of damagePopups) {
+          ctx.globalAlpha = dp.alpha;
+          ctx.fillText(dp.value, dp.x, dp.y);
+          ctx.globalAlpha = 1;
+        }
+        // Aim guides
+        drawAimDot();
+        drawAimLine();
+        drawTrajectory();
+      }
+
+      function drawHealthBar(ch) {
+        const w = 34,
+          h = 6;
+        const x = ch.x + (ch.width - w) / 2,
+          y = ch.y - 12;
+        ctx.fillStyle = "rgba(0,0,0,0.6)";
+        ctx.fillRect(x, y, w, h);
+        ctx.fillStyle = "#32cd32";
+        ctx.fillRect(x, y, (ch.health / ch.maxHealth) * w, h);
+      }
+
+      function drawAimLine() {
+        if (!isAiming || currentTurn !== "player") return;
+        const sx = player.x + player.width / 2,
+          sy = player.y;
+        const ex = sx - Math.cos(aimAngle) * aimPower * 20;
+        const ey = sy - Math.sin(aimAngle) * aimPower * 20;
+        ctx.strokeStyle = "rgba(50,50,50,0.9)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+      }
+
+      function drawAimDot() {
+        if (!isAiming || !aimDot) return;
+        ctx.fillStyle = "rgba(255,255,255,0.8)";
+        ctx.beginPath();
+        ctx.arc(aimDot.x, aimDot.y, 6, 0, Math.PI * 2);
+        ctx.fill();
+      }
+
+      function drawTrajectory() {
+        if (!isAiming || currentTurn !== "player") return;
+        let tx = player.x + player.width / 2,
+          ty = player.y;
+        const wpn = weapons[weaponKeys[currentWeaponIndex]];
+        let tvx = Math.cos(aimAngle) * aimPower * wpn.speed;
+        let tvy = Math.sin(aimAngle) * aimPower * wpn.speed;
+
+        ctx.setLineDash([6, 6]);
+        ctx.strokeStyle = "rgba(60,60,60,0.7)";
+        ctx.lineWidth = 2;
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+
+        for (let i = 0; i < 90; i++) {
+          tvy += gravity * (wpn.gravityScale || 1) * FRAME_STEP;
+          tvx *= 1 - (wpn.drag || 0);
+          tvy *= 1 - (wpn.drag || 0);
+          tvx += wind * 0.01 * FRAME_STEP;
+          tx += tvx * FRAME_STEP;
+          ty += tvy * FRAME_STEP;
+
+          ctx.lineTo(tx, ty);
+          if (isSolidPixel(tx | 0, ty | 0)) break; // stop at current terrain
+        }
+        ctx.stroke();
+        ctx.setLineDash([]);
+      }
+
+      function drawHUD() {
+        resetTransform();
+        ctx.fillStyle = "#111a";
+        ctx.fillRect(12, 12, 290, 140);
+        ctx.fillStyle = "#fff";
+        ctx.font = "18px Arial";
+        ctx.textAlign = "left";
+        ctx.fillText(`Turn: ${currentTurn}`, 24, 40);
+        ctx.fillText(`Time: ${Math.ceil(turnTimer / 60)}s`, 24, 65);
+        ctx.fillText(`Wind: ${wind.toFixed(2)}`, 24, 90);
+        ctx.fillText(
+          `Weapon [1/2/3]: ${weaponKeys[currentWeaponIndex]}`,
+          24,
+          115
+        );
+        ctx.font = "14px Arial";
+        ctx.fillText("R: restart • Drag to aim • Release to fire", 24, 140);
+      }
+
+      // ------------------- LOOP -------------------
+      function gameLoop() {
+        updateTurn();
+        updateCamera();
+        drawBackground();
+        drawWorld();
+        drawHUD();
+        requestAnimationFrame(gameLoop);
+      }
+      gameLoop();
+    </script>
+  </body>
+</html>

@@ -1,0 +1,594 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Wild Ones Minimal – v2</title>
+    <style>
+      html,
+      body {
+        margin: 0;
+        background: #0f1220;
+        color: #ddd;
+        font-family: system-ui, Arial, sans-serif;
+      }
+      #hud {
+        position: fixed;
+        left: 12px;
+        top: 12px;
+        font-size: 14px;
+        line-height: 1.4;
+      }
+      .stat {
+        margin-bottom: 6px;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+    </style>
+  </head>
+  <body>
+    <canvas
+      id="game"
+      width="1400"
+      height="800"
+      style="border: 1px solid #222; background: #9ac7ff"
+    ></canvas>
+    <div id="hud"></div>
+
+    <script>
+      // =================== UTIL & RNG (deterministic) ===================
+      function makeRNG(seed) {
+        let s = seed >>> 0;
+        return function rand() {
+          // LCG (Numerical Recipes)
+          s = (s * 1664525 + 1013904223) >>> 0;
+          return s / 4294967296;
+        };
+      }
+      const rng = makeRNG(0xc0ffee);
+
+      // =================== CANVASES ===================
+      const canvas = document.getElementById("game");
+      const ctx = canvas.getContext("2d");
+      const W = canvas.width,
+        H = canvas.height;
+
+      // Offscreen terrain canvas for destructible ground
+      const terrainCanvas = document.createElement("canvas");
+      terrainCanvas.width = W;
+      terrainCanvas.height = H;
+      const tctx = terrainCanvas.getContext("2d");
+
+      // =================== WORLD CONSTANTS ===================
+      // Physics units are px and seconds. Fixed-step for determinism.
+      const FIXED_DT = 1 / 60; // seconds per step
+      const GRAVITY = 6; // px/s^2 (≈ 0.1px/frame at 60fps)
+      const WIND_MAG = 2; // random wind in [-2, 2]
+      const FLOOR_Y = (H / 1.25) | 0; // base floor height
+
+      // Turn system
+      let currentTurn = "player";
+      let turnTimer = 30; // seconds
+      let projectileFiredThisTurn = false;
+
+      // Wind is an acceleration in x added to projectiles (px/s^2)
+      let wind = (rng() * 2 - 1) * WIND_MAG; // [-2, 2]
+
+      // Camera (minimal: only screen shake)
+      const camera = { shake: 0, sx: 0, sy: 0 };
+
+      // =================== TERRAIN INIT ===================
+      function initTerrain() {
+        // Sky is canvas background. Draw ground on terrain layer.
+        tctx.fillStyle = "#3b7f2f";
+        tctx.fillRect(0, FLOOR_Y, W, H - FLOOR_Y);
+        // Add a couple of static mounds for variety
+        tctx.fillStyle = "#3b7f2f";
+        tctx.beginPath();
+        tctx.ellipse(W * 0.35, FLOOR_Y - 10, 160, 50, 0, 0, Math.PI * 2);
+        tctx.fill();
+        tctx.beginPath();
+        tctx.ellipse(W * 0.7, FLOOR_Y - 30, 220, 70, 0, 0, Math.PI * 2);
+        tctx.fill();
+      }
+
+      function carveHole(x, y, r) {
+        tctx.save();
+        tctx.globalCompositeOperation = "destination-out";
+        tctx.beginPath();
+        tctx.arc(x, y, r, 0, Math.PI * 2);
+        tctx.fill();
+        tctx.restore();
+      }
+
+      function terrainAlphaAt(x, y) {
+        if (x < 0 || y < 0 || x >= W || y >= H) return 0;
+        const d = tctx.getImageData(x | 0, y | 0, 1, 1).data;
+        return d[3];
+      }
+      function terrainSolidAt(x, y) {
+        return terrainAlphaAt(x, y) > 0;
+      }
+
+      // =================== PLATFORMS (moving props) ===================
+      // Keep your moving platforms as separate colliders above terrain
+      const platforms = [
+        // Moving bars & pillars (px/s velocities)
+        {
+          x: 200,
+          y: FLOOR_Y - 100,
+          width: 150,
+          height: 10,
+          vx: 90,
+          color: "#6d4c41",
+        },
+        {
+          x: 500,
+          y: FLOOR_Y - 200,
+          width: 10,
+          height: 100,
+          vx: -60,
+          color: "#6d4c41",
+        },
+        {
+          x: 800,
+          y: FLOOR_Y - 300,
+          width: 100,
+          height: 10,
+          vx: 60,
+          color: "#6d4c41",
+        },
+        {
+          x: 1100,
+          y: FLOOR_Y - 400,
+          width: 300,
+          height: 5,
+          vx: -60,
+          color: "#6d4c41",
+        },
+      ];
+
+      // =================== ENTITIES ===================
+      function makePawn(x, y, color) {
+        return {
+          x,
+          y,
+          w: 26,
+          h: 26,
+          color,
+          vx: 0,
+          vy: 0,
+          grounded: false,
+          health: 100,
+          maxHealth: 100,
+        };
+      }
+      const player = makePawn(120, FLOOR_Y - 26, "#1e88e5");
+      const enemy = makePawn(700, FLOOR_Y - 26, "#e53935");
+      enemy.cooldown = 0;
+
+      // =================== INPUT / AIMING ===================
+      let isAiming = false;
+      let aimAngle = 0; // radians
+      let aimPower = 0; // [0..10] UI scale, mapped to speed
+      let selectedWeapon = 0; // 0 grenade, 1 rocket, 2 cluster (stub)
+
+      canvas.addEventListener("mousedown", (e) => {
+        if (currentTurn !== "player") return;
+        isAiming = true;
+      });
+      canvas.addEventListener("mousemove", (e) => {
+        if (!isAiming) return;
+        const rect = canvas.getBoundingClientRect();
+        const mx = e.clientX - rect.left;
+        const my = e.clientY - rect.top;
+        const sx = player.x + player.w / 2;
+        const sy = player.y;
+        const dx = sx - mx;
+        const dy = sy - my;
+        aimAngle = Math.atan2(dy, dx);
+        aimPower = Math.min(Math.sqrt(dx * dx + dy * dy) / 25, 10);
+      });
+      canvas.addEventListener("mouseup", () => {
+        if (!isAiming || currentTurn !== "player") return;
+        isAiming = false;
+        fireFrom(player, aimAngle, aimPower);
+      });
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "1") selectedWeapon = 0;
+        if (e.key === "2") selectedWeapon = 1;
+        if (e.key === "3") selectedWeapon = 2;
+      });
+
+      // =================== PROJECTILES & EXPLOSIONS ===================
+      const projectiles = [];
+      const visuals = []; // explosion circles, particles, etc.
+
+      function fireFrom(shooter, angle, uiPower) {
+        const speed = uiPower * 60; // map 0..10 UI to ~0..600 px/s
+        const p = new Projectile(
+          shooter.x + shooter.w / 2,
+          shooter.y,
+          Math.cos(angle) * speed,
+          Math.sin(angle) * speed,
+          selectedWeapon
+        );
+        projectiles.push(p);
+        projectileFiredThisTurn = true;
+      }
+
+      class Projectile {
+        constructor(x, y, vx, vy, weaponId = 0) {
+          this.x = x;
+          this.y = y;
+          this.vx = vx;
+          this.vy = vy;
+          this.r = 9;
+          this.alive = true;
+          this.weaponId = weaponId;
+          this.life = 12; // seconds max (failsafe)
+        }
+        update(dt) {
+          // Integrate
+          this.vy += GRAVITY * dt;
+          // Wind only affects airborne projectiles
+          this.vx += wind * 0.6 * dt; // ~0.01/frame at 60fps previously
+          this.x += this.vx * dt;
+          this.y += this.vy * dt;
+
+          // Collide with terrain (sample around the rim)
+          if (this.collidesWithTerrain()) {
+            this.explode();
+            return;
+          }
+          // Collide with platforms
+          for (const p of platforms) {
+            if (
+              this.x + this.r > p.x &&
+              this.x - this.r < p.x + p.width &&
+              this.y + this.r > p.y &&
+              this.y - this.r < p.y + p.height
+            ) {
+              this.explode();
+              return;
+            }
+          }
+          // Collide with pawns (AABB)
+          for (const ch of [player, enemy]) {
+            if (
+              this.x > ch.x &&
+              this.x < ch.x + ch.w &&
+              this.y > ch.y &&
+              this.y < ch.y + ch.h
+            ) {
+              this.explode();
+              return;
+            }
+          }
+          // Bounds
+          if (this.x < -100 || this.x > W + 100 || this.y > H + 100) {
+            this.alive = false;
+          }
+          this.life -= dt;
+          if (this.life <= 0) this.alive = false;
+        }
+        collidesWithTerrain() {
+          const r = this.r | 0;
+          // Sample 4 points around the circumference; cheap and good-enough
+          return (
+            terrainSolidAt(this.x, this.y + r) ||
+            terrainSolidAt(this.x, this.y - r) ||
+            terrainSolidAt(this.x + r, this.y) ||
+            terrainSolidAt(this.x - r, this.y)
+          );
+        }
+        explode() {
+          this.alive = false;
+          // Weapon-specific blast
+          const blast = weaponBlasts[this.weaponId] || weaponBlasts[0];
+          doExplosion(
+            this.x,
+            this.y,
+            blast.radius,
+            blast.damage,
+            blast.impulse
+          );
+        }
+        draw(ctx) {
+          ctx.fillStyle = "#ff9800";
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      const weaponBlasts = [
+        { name: "Grenade", radius: 42, damage: 55, impulse: 300 },
+        { name: "Rocket", radius: 30, damage: 40, impulse: 260 },
+        { name: "Cluster", radius: 24, damage: 28, impulse: 220 },
+      ];
+
+      function doExplosion(x, y, radius, maxDamage, impulse) {
+        // Visual
+        visuals.push(new ExplosionCircle(x, y, radius));
+        // Camera shake
+        camera.shake = Math.min(camera.shake + 12, 18);
+        // Destruct terrain
+        carveHole(x, y, radius);
+        // Damage + knockback once
+        for (const ch of [player, enemy]) {
+          const cx = ch.x + ch.w / 2,
+            cy = ch.y + ch.h / 2;
+          const dx = cx - x,
+            dy = cy - y;
+          const dist = Math.hypot(dx, dy);
+          if (dist < radius) {
+            const falloff = 1 - dist / radius; // 0..1
+            const dmg = Math.round(maxDamage * falloff);
+            ch.health = Math.max(0, ch.health - dmg);
+            const nx = dx / (dist || 1),
+              ny = dy / (dist || 1);
+            const power = impulse * falloff; // px/s
+            ch.vx += nx * power;
+            ch.vy += ny * power * -0.2; // bias upward slightly
+          }
+        }
+      }
+
+      class ExplosionCircle {
+        constructor(x, y, maxR) {
+          this.x = x;
+          this.y = y;
+          this.r = 0;
+          this.maxR = maxR;
+          this.a = 1;
+        }
+        update(dt) {
+          this.r += 220 * dt;
+          this.a -= 1.6 * dt;
+        }
+        draw(ctx) {
+          if (this.a <= 0) return;
+          ctx.fillStyle = `rgba(255,165,0,${Math.max(0, this.a).toFixed(3)})`;
+          ctx.beginPath();
+          ctx.arc(this.x, this.y, this.r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // =================== ENEMY AI ===================
+      function enemyAct(dt) {
+        if (enemy.cooldown > 0) {
+          enemy.cooldown -= dt;
+          return;
+        }
+        // naive lead: just shoot toward player with a medium speed + wind bias
+        const dx = player.x - enemy.x;
+        const dy = player.y - enemy.y;
+        const angle = Math.atan2(dy, dx);
+        const power = 6 + rng() * 2; // UI power ~6..8
+        fireFrom(enemy, angle, power);
+        enemy.cooldown = 2.0; // seconds between shots (only used on its turn)
+      }
+
+      // =================== COLLISION (pawns vs terrain/platforms) ===================
+      function applyPawnPhysics(ch, dt) {
+        // gravity
+        ch.vy += GRAVITY * dt;
+        // integrate
+        ch.x += ch.vx * dt;
+        ch.y += ch.vy * dt;
+        // air drag
+        ch.vx *= 0.985;
+
+        // collide with terrain feet-first (simple vertical snap)
+        ch.grounded = false;
+        const feetX = ch.x + ch.w / 2;
+        // If inside terrain, push up until not solid (scan up to a cap)
+        if (terrainSolidAt(feetX, ch.y + ch.h)) {
+          for (let i = 0; i < 40; i++) {
+            if (!terrainSolidAt(feetX, ch.y + ch.h - i)) {
+              ch.y = (ch.y - i) | 0;
+              ch.vy = 0;
+              ch.grounded = true;
+              break;
+            }
+          }
+        }
+        // collide with platforms from above only
+        for (const p of platforms) {
+          if (
+            ch.x + ch.w > p.x &&
+            ch.x < p.x + p.width &&
+            ch.y + ch.h > p.y &&
+            ch.y + ch.h < p.y + p.height + Math.max(0, ch.vy * dt + 1)
+          ) {
+            ch.y = p.y - ch.h;
+            ch.vy = 0;
+            ch.grounded = true;
+            // carry along
+            ch.x += p.vx * dt;
+          }
+        }
+        // keep in-bounds
+        ch.x = Math.max(0, Math.min(W - ch.w, ch.x));
+        ch.y = Math.min(ch.y, H - ch.h);
+      }
+
+      // =================== TURN SYSTEM ===================
+      function endTurn() {
+        turnTimer = 30; // seconds
+        projectileFiredThisTurn = false;
+        currentTurn = currentTurn === "player" ? "enemy" : "player";
+        wind = (rng() * 2 - 1) * WIND_MAG;
+      }
+
+      function updateTurn(dt) {
+        turnTimer -= dt;
+        if (turnTimer <= 0) endTurn();
+
+        // Enemy only thinks during its turn
+        if (currentTurn === "enemy" && !projectileFiredThisTurn) {
+          enemyAct(dt);
+        }
+
+        // Move platforms
+        for (const p of platforms) {
+          p.x += p.vx * dt;
+          if (p.x < 0) {
+            p.x = 0;
+            p.vx *= -1;
+          }
+          if (p.x + p.width > W) {
+            p.x = W - p.width;
+            p.vx *= -1;
+          }
+        }
+
+        // Pawns
+        applyPawnPhysics(player, dt);
+        applyPawnPhysics(enemy, dt);
+
+        // Projectiles + visuals
+        for (let i = projectiles.length - 1; i >= 0; i--) {
+          const p = projectiles[i];
+          p.update(dt);
+          if (!p.alive) projectiles.splice(i, 1);
+        }
+        for (let i = visuals.length - 1; i >= 0; i--) {
+          const v = visuals[i];
+          v.update(dt);
+          if (v.a <= 0) visuals.splice(i, 1);
+        }
+
+        // End turn after shot fully resolves
+        if (
+          projectileFiredThisTurn &&
+          projectiles.length === 0 &&
+          visuals.length === 0
+        ) {
+          endTurn();
+        }
+
+        // Camera shake decay
+        if (camera.shake > 0)
+          camera.shake = Math.max(0, camera.shake - 60 * dt);
+        camera.sx = (rng() * 2 - 1) * camera.shake;
+        camera.sy = (rng() * 2 - 1) * camera.shake;
+      }
+
+      // =================== RENDER ===================
+      function drawTerrain() {
+        ctx.drawImage(terrainCanvas, 0, 0);
+      }
+      function drawPlatforms() {
+        for (const p of platforms) {
+          ctx.fillStyle = p.color;
+          ctx.fillRect(p.x, p.y, p.width, p.height);
+        }
+      }
+      function drawPawn(ch) {
+        ctx.fillStyle = ch.color;
+        ctx.fillRect(ch.x, ch.y, ch.w, ch.h);
+        // health bar
+        const bw = Math.max(0, (ch.health / ch.maxHealth) * ch.w);
+        ctx.fillStyle = "#111";
+        ctx.fillRect(ch.x, ch.y - 10, ch.w, 6);
+        ctx.fillStyle = "#1de9b6";
+        ctx.fillRect(ch.x, ch.y - 10, bw, 6);
+      }
+      function drawHUD() {
+        const hud = document.getElementById("hud");
+        const wArrow = wind > 0 ? "→" : wind < 0 ? "←" : "·";
+        hud.innerHTML = `
+          <div class="stat">Turn: <span class="mono">${currentTurn}</span></div>
+          <div class="stat">Timer: <span class="mono">${Math.ceil(
+            turnTimer
+          )}s</span></div>
+          <div class="stat">Wind: <span class="mono">${wArrow} ${wind.toFixed(
+          2
+        )}</span></div>
+          <div class="stat">Weapon: <span class="mono">${
+            ["Grenade", "Rocket", "Cluster"][selectedWeapon]
+          }</span></div>
+          <div class="stat">P HP: <span class="mono">${
+            player.health
+          }</span> | E HP: <span class="mono">${enemy.health}</span></div>
+        `;
+      }
+      function drawAim() {
+        if (!isAiming || currentTurn !== "player") return;
+        const sx = player.x + player.w / 2;
+        const sy = player.y;
+        const ex = sx - Math.cos(aimAngle) * aimPower * 22;
+        const ey = sy - Math.sin(aimAngle) * aimPower * 22;
+        ctx.strokeStyle = "rgba(0,0,0,0.6)";
+        ctx.setLineDash([6, 6]);
+        ctx.beginPath();
+        ctx.moveTo(sx, sy);
+        ctx.lineTo(ex, ey);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        // Trajectory preview (simulate)
+        let tx = sx,
+          ty = sy,
+          tvx = Math.cos(aimAngle) * aimPower * 60,
+          tvy = Math.sin(aimAngle) * aimPower * 60;
+        ctx.strokeStyle = "rgba(0,0,0,0.35)";
+        ctx.beginPath();
+        ctx.moveTo(tx, ty);
+        for (let i = 0; i < 120; i++) {
+          // 2 seconds
+          tvy += GRAVITY * FIXED_DT;
+          tvx += wind * 0.6 * FIXED_DT;
+          tx += tvx * FIXED_DT;
+          ty += tvy * FIXED_DT;
+          ctx.lineTo(tx, ty);
+          if (terrainSolidAt(tx, ty) || ty > H) break;
+        }
+        ctx.stroke();
+      }
+
+      function render() {
+        ctx.save();
+        ctx.clearRect(0, 0, W, H);
+        // Apply simple screen shake
+        ctx.translate(camera.sx | 0, camera.sy | 0);
+
+        drawTerrain();
+        drawPlatforms();
+        drawPawn(player);
+        drawPawn(enemy);
+        for (const p of projectiles) p.draw(ctx);
+        for (const v of visuals) v.draw(ctx);
+        drawAim();
+
+        ctx.restore();
+        drawHUD();
+      }
+
+      // =================== GAME LOOP (fixed timestep) ===================
+      function update(dt) {
+        updateTurn(dt);
+      }
+      let last = performance.now();
+      let acc = 0;
+      function frame(now) {
+        const raw = (now - last) / 1000;
+        last = now;
+        acc += Math.min(raw, 0.25); // avoid spiral of death
+        while (acc >= FIXED_DT) {
+          update(FIXED_DT);
+          acc -= FIXED_DT;
+        }
+        render();
+        requestAnimationFrame(frame);
+      }
+
+      // =================== BOOT ===================
+      initTerrain();
+      requestAnimationFrame(frame);
+    </script>
+  </body>
+</html>

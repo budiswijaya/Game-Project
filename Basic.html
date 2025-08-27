@@ -1,0 +1,424 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Document</title>
+    <link rel="stylesheet" href="style.css" />
+    <script src="script.js" defer></script>
+  </head>
+  <body>
+    <canvas
+      id="gameCanvas"
+      width="600"
+      height="400"
+      style="border: 1px solid black"
+    ></canvas>
+    <canvas
+      id="lineCanvas"
+      width="600"
+      height="150"
+      style="border: 1px solid black"
+    ></canvas>
+    <canvas
+      id="animationCanvas"
+      width="600"
+      height="150"
+      style="border: 1px solid black"
+    ></canvas>
+    <canvas
+      id="gravityCanvas"
+      width="600"
+      height="150"
+      style="border: 1px solid black"
+    ></canvas>
+    <canvas
+      id="playerCanvas"
+      width="600"
+      height="150"
+      style="border: 1px solid black"
+    ></canvas>
+
+    <script>
+      // ! Get the canvas element
+      const canvas = document.getElementById("gameCanvas");
+
+      // ! Get its 2D drawing context (the "paintbrush")
+      const ctx = canvas.getContext("2d");
+
+      // ! 1. Fill a rectangle
+      ctx.fillStyle = "red"; // set color
+      ctx.fillRect(50, 50, 100, 80); // x, y, width, height
+
+      // ! 2. Stroke a rectangle (just the outline)
+      ctx.strokeStyle = "blue"; // outline color
+      ctx.strokeRect(200, 50, 100, 80);
+
+      // ! 3. Draw a circle (arc)
+      ctx.beginPath();
+      ctx.arc(300, 200, 40, 0, Math.PI * 2); // full circle
+      ctx.fillStyle = "green";
+      ctx.fill();
+
+      // ! 4. Draw text
+      ctx.fillStyle = "black";
+      ctx.font = "20px Arial";
+      ctx.fillText("Score: 100", 20, 30);
+
+      // ! 5. Clear the canvas
+      // ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+      // ! 6. Draw an image
+      const img = new Image();
+      img.src = "player.png";
+      img.onload = () => {
+        ctx.drawImage(img, 100, 100, 64, 64); // x, y, width, height
+      };
+
+      // ! 7. Change line style (for outlines / paths)
+      ctx.strokeStyle = "purple";
+      ctx.lineWidth = 5;
+      ctx.beginPath();
+      ctx.moveTo(50, 300); // start point
+      ctx.lineTo(200, 350); // draw line
+      ctx.stroke();
+
+      // ! 8. Save & Restore state
+      ctx.save();
+      ctx.fillStyle = "orange";
+      ctx.fillRect(400, 50, 80, 80);
+      ctx.restore();
+
+      // ! 9. Draw a triangle
+      ctx.beginPath();
+      ctx.moveTo(400, 200); // Top corner
+      ctx.lineTo(300, 380); // Bottom-left
+      ctx.lineTo(500, 380); // Bottom-right
+      ctx.closePath(); // Back to top
+
+      ctx.fillStyle = "skyblue"; // Fill color
+      ctx.fill(); // Solid triangle
+      ctx.stroke(); // Optional outline
+
+      // ! 10. Freehand drawing
+
+      // let drawing = false;
+
+      // canvas.addEventListener("mousedown", () => {
+      // drawing = true;
+      // ctx.beginPath(); // start a new line
+      // });
+
+      // canvas.addEventListener("mouseup", () => {
+      // drawing = false;
+      // });
+
+      // canvas.addEventListener("mousemove", (event) => {
+      // if (!drawing) return;
+
+      // // get mouse position relative to canvas
+      // const rect = canvas.getBoundingClientRect();
+      // const x = event.clientX - rect.left;
+      // const y = event.clientY - rect.top;
+
+      // ctx.lineTo(x, y);
+      // ctx.stroke();
+      // });
+
+      // ! 11. Linehand drawing
+
+      const lineCanvas = document.getElementById("lineCanvas");
+      const lineCtx = lineCanvas.getContext("2d");
+
+      let startX, startY;
+      let drawing = false;
+
+      lineCanvas.addEventListener("mousedown", (e) => {
+        const rect = lineCanvas.getBoundingClientRect();
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+        drawing = true;
+      });
+
+      lineCanvas.addEventListener("mousemove", (e) => {
+        if (!drawing) return;
+
+        const rect = lineCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        // clear canvas each frame so only one preview line is visible
+        lineCtx.clearRect(0, 0, lineCanvas.width, lineCanvas.height);
+
+        lineCtx.beginPath();
+        lineCtx.moveTo(startX, startY);
+        lineCtx.lineTo(x, y);
+        lineCtx.stroke();
+      });
+
+      lineCanvas.addEventListener("mouseup", (e) => {
+        if (!drawing) return;
+        drawing = false;
+
+        // when mouse released, finalize the line
+        const rect = lineCanvas.getBoundingClientRect();
+        const x = e.clientX - rect.left;
+        const y = e.clientY - rect.top;
+
+        lineCtx.beginPath();
+        lineCtx.moveTo(startX, startY);
+        lineCtx.lineTo(x, y);
+        lineCtx.stroke();
+      });
+
+      // ! 12. Move animation
+
+      const animationCanvas = document.getElementById("animationCanvas");
+      const animationCtx = animationCanvas.getContext("2d");
+
+      let x = 0; // starting position
+      let y = 75;
+      function draw() {
+        animationCtx.clearRect(
+          0,
+          0,
+          animationCanvas.width,
+          animationCanvas.height
+        ); // clear screen
+
+        animationCtx.beginPath();
+        animationCtx.arc(x, y, 20, 0, Math.PI * 2);
+        animationCtx.fillStyle = "blue";
+        animationCtx.fill();
+
+        x += 2; // move right
+        requestAnimationFrame(draw); // keep looping
+      }
+      draw();
+
+      const gravityCanvas = document.getElementById("gravityCanvas");
+      const gravityCtx = gravityCanvas.getContext("2d");
+
+      // ! 12. Gravitation
+
+      let x1 = 0; // starting position
+      let y1 = 75;
+      let vx = 8; // horizontal velocity
+      let vy = -3; // vertical velocity (upward)
+
+      function gdraw() {
+        gravityCtx.clearRect(0, 0, gravityCanvas.width, gravityCanvas.height);
+
+        gravityCtx.beginPath();
+        gravityCtx.arc(x1, y1, 10, 0, Math.PI * 2);
+        gravityCtx.fillStyle = "red";
+        gravityCtx.fill();
+
+        x1 += vx;
+        y1 += vy;
+        vy += 0.1; // gravity pulling down
+
+        requestAnimationFrame(gdraw);
+      }
+      gdraw();
+
+      // ! 13. Player movement
+      const playerCanvas = document.getElementById("playerCanvas");
+      const playerCtx = playerCanvas.getContext("2d");
+
+      // Canvas dimensions
+      const WIDTH = playerCanvas.width;
+      const HEIGHT = playerCanvas.height;
+
+      const player = {
+        x: 50,
+        y: HEIGHT - 40,
+        width: 40,
+        height: 40,
+        velocityX: 0,
+        velocityY: 0,
+        speed: 1.5,
+        jumpStrength: -10,
+        grounded: false,
+      };
+
+      const gravity = 0.1;
+      const weather = true;
+      const windyness = 2;
+      const earthquake = 0.5;
+
+      const keys = {};
+      window.addEventListener("keydown", (e) => (keys[e.key] = true));
+      window.addEventListener("keyup", (e) => (keys[e.key] = false));
+
+      const platforms = [
+        { x: 50, y: HEIGHT - 60, width: 50, height: 5 },
+        { x: 200, y: HEIGHT - 100, width: 75, height: 5 },
+        { x: 400, y: HEIGHT - 75, width: 60, height: 5 },
+        { x: 600, y: HEIGHT - 120, width: 100, height: 5 },
+        { x: 850, y: HEIGHT - 90, width: 80, height: 5 },
+        { x: 1100, y: HEIGHT - 130, width: 150, height: 5 },
+      ];
+
+      let cameraX = 0;
+      let cameraY = 0;
+      const worldWidth = 1500; // total world width
+      const worldHeight = 170; // total world height (expanded!)
+
+      // ------------------- UPDATE PLAYER -------------------
+      function updatePlayer() {
+        // Horizontal movement
+        if (keys["ArrowLeft"] || keys["a"]) {
+          player.velocityX =
+            keys["Shift"] && player.grounded
+              ? -player.speed * 3
+              : -player.speed;
+        } else if (keys["ArrowRight"] || keys["d"]) {
+          player.velocityX =
+            keys["Shift"] && player.grounded ? player.speed * 3 : player.speed;
+        } else {
+          player.velocityX = 0;
+        }
+
+        // Jump
+        if ((keys["ArrowUp"] || keys[" "]) && player.grounded) {
+          player.velocityY = player.jumpStrength;
+          player.grounded = false;
+          if (weather) {
+            player.velocityY =
+              player.jumpStrength -
+              Math.random() * earthquake -
+              earthquake +
+              1.5;
+          }
+        }
+
+        // Softer gravity while rising
+        if (
+          (keys["ArrowUp"] || keys["w"] || keys[" "]) &&
+          !player.grounded &&
+          player.velocityY < 0
+        ) {
+          player.velocityY += 0.2;
+        }
+
+        // Apply gravity
+        player.velocityY += gravity;
+
+        // Weather effects
+        if (weather) {
+          player.velocityX += Math.random() * windyness - windyness / 2;
+          player.velocityY += Math.random() * earthquake - earthquake / 2;
+        }
+
+        // Predict new position
+        let nextX = player.x + player.velocityX;
+        let nextY = player.y + player.velocityY;
+
+        // Reset grounded state
+        player.grounded = false;
+
+        // Platform collision
+        for (let p of platforms) {
+          if (
+            nextX < p.x + p.width &&
+            nextX + player.width > p.x &&
+            player.y + player.height <= p.y &&
+            nextY + player.height >= p.y
+          ) {
+            nextY = p.y - player.height;
+            player.velocityY = 0;
+            player.grounded = true;
+          }
+        }
+
+        // Apply corrected position
+        player.x = nextX;
+        player.y = nextY;
+
+        // ------------------- CAMERA -------------------
+        const centerX = WIDTH / 2;
+        const centerY = HEIGHT / 2;
+
+        // Clamp
+        cameraX = Math.max(0, Math.min(cameraX, worldWidth - WIDTH));
+        cameraY = Math.max(0, Math.min(cameraY, worldHeight - HEIGHT));
+
+        cameraX = player.x - centerX;
+        cameraY = player.y - centerY;
+
+        if (cameraX < 0) cameraX = 0;
+        if (cameraX > worldWidth - WIDTH) cameraX = worldWidth - WIDTH;
+
+        if (cameraY < 0) cameraY = 0;
+        if (cameraY > worldHeight - HEIGHT) cameraY = worldHeight - HEIGHT;
+
+        // ------------------- WORLD BOUNDARIES -------------------
+        // Floor
+        if (player.y + player.height > worldHeight) {
+          player.y = worldHeight - player.height;
+          player.velocityY = 0;
+          player.grounded = true;
+        }
+
+        // Ceiling
+        if (player.y < 0) player.y = 0;
+
+        // Walls
+        if (player.x < 0) player.x = 0;
+        if (player.x + player.width > worldWidth)
+          player.x = worldWidth - player.width;
+      }
+
+      // ------------------- DRAW -------------------
+      function drawPlayer() {
+        playerCtx.fillStyle = "red";
+        playerCtx.fillRect(
+          player.x - cameraX,
+          player.y - cameraY,
+          player.width,
+          player.height
+        );
+      }
+
+      function drawPlatforms() {
+        playerCtx.fillStyle = "brown";
+        platforms.forEach((p) => {
+          playerCtx.fillRect(p.x - cameraX, p.y - cameraY, p.width, p.height);
+        });
+      }
+
+      function drawFloor() {
+        playerCtx.fillStyle = "green"; // grass floor
+        playerCtx.fillRect(
+          0 - cameraX,
+          worldHeight - 10 - cameraY,
+          worldWidth,
+          10
+        ); // grass strip
+
+        playerCtx.fillStyle = "darkgreen"; // dirt underneath
+        playerCtx.fillRect(
+          0 - cameraX,
+          worldHeight - cameraY,
+          worldWidth,
+          HEIGHT
+        );
+      }
+
+      // ------------------- GAME LOOP -------------------
+      function gameLoop() {
+        playerCtx.clearRect(0, 0, WIDTH, HEIGHT);
+
+        updatePlayer();
+        drawFloor();
+        drawPlatforms();
+        drawPlayer();
+
+        requestAnimationFrame(gameLoop);
+      }
+
+      gameLoop();
+    </script>
+  </body>
+</html>
